@@ -32,16 +32,16 @@ downloaded and sha256-verified on first run.
 ## Development
 
 ```sh
-pixi run build                # cross-compiles fervor-init + fervor-runner, then builds pixi-fervor
+pixi run build                # builds pixi-fervor (build.rs cross-compiles fervor-init + fervor-runner)
 pixi run test
 pixi run example-flask-run    # builds and boots examples/flask
 pixi run fervor -- --help     # runs the freshly built binary
-pixi build                    # packages pixi-fervor as a .conda (recipe/recipe.yaml)
+pixi build                    # packages pixi-fervor as a .conda (pixi-build-rust)
 ```
 
 `pixi-fervor` embeds the Linux `fervor-init` (and, on macOS, `fervor-runner`),
-so the release binary is self-contained; `FERVOR_INIT_BIN` / `FERVOR_RUNNER_BIN`
-are set by the pixi environment.
+so the release binary is self-contained. Its `build.rs` cross-compiles them
+with `cargo zigbuild`, which the pixi environment provides.
 
 ## Commands
 
