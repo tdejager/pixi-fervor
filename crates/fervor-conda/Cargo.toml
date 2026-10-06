@@ -1,0 +1,29 @@
+[package]
+name = "fervor-conda"
+description = "conda adapters for fervor: solving environments and reading package archives with rattler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+camino = { workspace = true }
+fervor-domain = { workspace = true }
+futures = { workspace = true }
+rattler = { workspace = true }
+rattler_conda_types = { workspace = true }
+rattler_digest = { workspace = true }
+rattler_networking = { workspace = true }
+rattler_package_streaming = { workspace = true }
+rattler_repodata_gateway = { workspace = true }
+rattler_solve = { workspace = true }
+reqwest = { workspace = true }
+reqwest-middleware = { workspace = true }
+tar = "0.4"
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

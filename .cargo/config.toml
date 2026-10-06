@@ -1,0 +1,4 @@
+# zig's linker ignores rustc's default `-Wl,-O1` and says so on every link of
+# a cross-compiled Linux binary; the notice is harmless.
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-A", "linker_messages"]

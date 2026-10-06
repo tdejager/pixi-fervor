@@ -1,0 +1,12 @@
+[package]
+name = "fervor-guest-abi"
+description = "Wire contract shared by the fervor host and the guest init: pack header, guest config, control protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

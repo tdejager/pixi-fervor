@@ -1,0 +1,19 @@
+# Linux run host for fervor on macOS: Firecracker needs /dev/kvm, which
+# requires Virtualization.framework nested virtualization (M3+, macOS 15+).
+base: template:ubuntu-24.04
+vmType: vz
+nestedVirtualization: true
+cpus: 4
+memory: 8GiB
+disk: 50GiB
+containerd:
+  system: false
+  user: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux
+      echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' > /etc/udev/rules.d/99-fervor-kvm.rules
+      udevadm control --reload-rules
+      udevadm trigger --name-match=kvm

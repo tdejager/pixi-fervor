@@ -1,0 +1,43 @@
+[workspace]
+channels = ["conda-forge"]
+name = "fervor"
+platforms = ["osx-arm64", "linux-aarch64"]
+version = "0.1.0"
+preview = ["pixi-build"]
+
+# `pixi build` packages the extension; recipe/recipe.yaml cross-compiles the
+# embedded Linux binaries first, like the `build` task.
+[package]
+name = "pixi-fervor"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "*" }
+
+# Linux binaries embedded into pixi-fervor (see crates/pixi-fervor/build.rs).
+[activation.env]
+FERVOR_INIT_BIN = "$PIXI_PROJECT_ROOT/target/aarch64-unknown-linux-gnu/release/fervor-init"
+FERVOR_RUNNER_BIN = "$PIXI_PROJECT_ROOT/target/aarch64-unknown-linux-gnu/release/fervor-runner"
+
+[tasks]
+build-guest = { cmd = "cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.28 -p fervor-init -p fervor-runner", description = "Cross-compile the guest init and the Linux runner" }
+build = { cmd = "cargo build --release -p pixi-fervor", depends-on = ["build-guest"], description = "Build pixi-fervor with the Linux binaries embedded" }
+test = { cmd = "cargo test --workspace", depends-on = ["build-guest"], description = "Run the workspace tests" }
+fervor = { cmd = "target/release/pixi-fervor", depends-on = ["build"], description = "Run the freshly built pixi-fervor" }
+example-flask-image = { cmd = "target/release/pixi-fervor build -s python=3.12 -s flask --copy examples/flask:/app --workdir /app -o out/flask -- python app.py", depends-on = ["build"], description = "Build the Flask example image into out/flask" }
+example-flask-run = { cmd = "target/release/pixi-fervor run out/flask -p 8080:5000", depends-on = ["example-flask-image"], description = "Boot the Flask example; serves http://127.0.0.1:8080" }
+
+# Lima is installed globally: pixi global install -c https://prefix.dev/github-releases lima
+[target.osx-arm64.tasks]
+lima-up = { cmd = "limactl start --tty=false --name=fervor lima/fervor.yaml", description = "Create and start the Lima run host (nested virtualization)" }
+lima-start = { cmd = "limactl start fervor", description = "Start the existing Lima run host" }
+lima-stop = { cmd = "limactl stop fervor", description = "Stop the Lima run host" }
+lima-kvm = { cmd = "limactl shell fervor -- ls -l /dev/kvm", description = "Check that /dev/kvm exists in the run host" }
+
+[target.osx-arm64.dependencies]
+rust-std-aarch64-unknown-linux-gnu = ">=1.98.1,<2"
+
+[dependencies]
+rust = ">=1.98.1,<1.99"
+cargo-zigbuild = ">=0.23.4,<0.24"
+zig = ">=0.16.0,<0.17"

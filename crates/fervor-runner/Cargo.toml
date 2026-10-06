@@ -1,0 +1,17 @@
+[package]
+name = "fervor-runner"
+description = "Boots a fervor image in Firecracker on a Linux host with KVM"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+camino = { workspace = true }
+clap = { workspace = true }
+fervor-domain = { workspace = true }
+fervor-store = { workspace = true }
+fervor-vmm = { workspace = true }
+miette = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }

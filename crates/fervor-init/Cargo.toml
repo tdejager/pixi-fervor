@@ -1,0 +1,19 @@
+[package]
+name = "fervor-init"
+description = "PID 1 of a fervor guest: stacks the layer pack into an overlay root, runs the entrypoint and reports to the host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fervor-init"
+path = "src/main.rs"
+
+[dependencies]
+fervor-guest-abi = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+rustix = { workspace = true }
+serde_json = { workspace = true }

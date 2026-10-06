@@ -1,0 +1,17 @@
+[package]
+name = "fervor-store"
+description = "Filesystem layer store and image repository shared by the fervor build and run hosts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+camino = { workspace = true }
+fervor-domain = { workspace = true }
+rattler_digest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+

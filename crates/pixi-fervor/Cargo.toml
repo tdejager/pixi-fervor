@@ -1,0 +1,25 @@
+[package]
+name = "pixi-fervor"
+description = "pixi extension: build and run Firecracker microVM images from conda environments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pixi-fervor"
+path = "src/main.rs"
+
+[dependencies]
+camino = { workspace = true }
+clap = { workspace = true }
+fervor-app = { workspace = true }
+fervor-conda = { workspace = true }
+fervor-domain = { workspace = true }
+fervor-layerfs = { workspace = true }
+fervor-store = { workspace = true }
+fervor-vmm = { workspace = true }
+miette = { workspace = true }
+rattler_conda_types = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

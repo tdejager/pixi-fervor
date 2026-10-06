@@ -1,0 +1,16 @@
+[package]
+name = "fervor-layerfs"
+description = "SquashFS layer builder and host tree reader for fervor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+backhand = { workspace = true }
+camino = { workspace = true }
+fervor-domain = { workspace = true }
+fervor-store = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }

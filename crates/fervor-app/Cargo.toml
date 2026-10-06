@@ -1,0 +1,17 @@
+[package]
+name = "fervor-app"
+description = "fervor's build use case: resolve, build layers, write the image manifest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+camino = { workspace = true }
+fervor-conda = { workspace = true }
+fervor-domain = { workspace = true }
+fervor-layerfs = { workspace = true }
+fervor-store = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
