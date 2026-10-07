@@ -15,6 +15,7 @@ use fervor_app::ImageBuilder;
 use fervor_conda::CondaClient;
 use fervor_domain::boot::InitBinary;
 use fervor_domain::image::Image;
+use fervor_domain::platform::GuestPlatform;
 use fervor_domain::size::ByteSize;
 use fervor_store::{ImageDir, LayerStore};
 use miette::IntoDiagnostic;
@@ -39,13 +40,19 @@ struct Fervor {
 }
 
 impl Fervor {
-    /// PID 1 of every guest, cross-compiled for the guest platform.
-    const INIT_BIN: &[u8] = include_bytes!(env!("FERVOR_INIT_BIN"));
+    /// PID 1 of every guest, cross-compiled for `platform`.
+    fn init_binary(platform: GuestPlatform) -> InitBinary {
+        let bytes: &[u8] = match platform {
+            GuestPlatform::LinuxAarch64 => include_bytes!(env!("FERVOR_INIT_AARCH64_BIN")),
+            GuestPlatform::LinuxX86_64 => include_bytes!(env!("FERVOR_INIT_X86_64_BIN")),
+        };
+        InitBinary::new(bytes.to_vec())
+    }
 
     async fn build(&self, args: BuildArgs) -> miette::Result<()> {
         let command = args.into_command()?;
         let output = command.output.clone();
-        let init = InitBinary::new(Self::INIT_BIN.to_vec());
+        let init = Self::init_binary(command.environment.platform());
         let client = CondaClient::authenticated().into_diagnostic()?;
         let builder = ImageBuilder::new(&self.cache_root, client, init).into_diagnostic()?;
         let image = builder.build(command, &StderrProgress::report).await.into_diagnostic()?;

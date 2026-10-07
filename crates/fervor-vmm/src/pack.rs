@@ -136,7 +136,7 @@ mod tests {
             LayerStack::new(layers.iter().map(|b| layer_from(store, LayerKind::Package, b)).collect()).unwrap(),
             entrypoint,
             ScratchSize::default(),
-            crate::artifacts::pinned_artifacts(GuestPlatform::LinuxAarch64).unwrap(),
+            crate::artifacts::pinned_artifacts(GuestPlatform::LinuxAarch64),
         )
         .unwrap()
     }

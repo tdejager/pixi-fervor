@@ -113,14 +113,11 @@ pub struct RunArgs {
 impl BuildArgs {
     /// The guest architecture matching this machine, so guests run without emulation.
     fn host_platform() -> GuestPlatform {
-        match std::env::consts::ARCH {
-            "x86_64" => GuestPlatform::LinuxX86_64,
-            _ => GuestPlatform::LinuxAarch64,
-        }
+        GuestPlatform::native().unwrap_or(GuestPlatform::LinuxAarch64)
     }
 
     pub fn into_command(self) -> miette::Result<BuildImage> {
-        let artifacts = pinned_artifacts(self.platform).into_diagnostic()?;
+        let artifacts = pinned_artifacts(self.platform);
         let channel_config = ChannelConfig::default_with_root_dir(std::env::current_dir().into_diagnostic()?);
         let specs = self
             .specs

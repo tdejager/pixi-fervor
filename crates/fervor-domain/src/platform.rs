@@ -32,6 +32,16 @@ pub enum KernelFormat {
 }
 
 impl GuestPlatform {
+    /// The guest platform matching this machine's CPU, if Firecracker
+    /// supports it. KVM only boots guests of this platform.
+    pub fn native() -> Option<Self> {
+        match std::env::consts::ARCH {
+            "aarch64" => Some(Self::LinuxAarch64),
+            "x86_64" => Some(Self::LinuxX86_64),
+            _ => None,
+        }
+    }
+
     pub fn subdir(self) -> Subdir {
         match self {
             Self::LinuxAarch64 => Subdir::LinuxAarch64,

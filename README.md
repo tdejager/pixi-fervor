@@ -15,8 +15,11 @@ transfers the layers it does not have yet.
 
 ## Requirements
 
-- Build host: macOS (Apple Silicon) or Linux, with [pixi](https://pixi.sh).
-- Run host: Linux with `/dev/kvm`. On macOS, fervor boots images inside a
+- Build host: macOS (Apple Silicon) or Linux (aarch64, x86_64), with
+  [pixi](https://pixi.sh). Images can be built for either guest
+  architecture (`--platform linux-aarch64|linux-64`).
+- Run host: Linux with `/dev/kvm` and the image's architecture (KVM does not
+  emulate other CPUs). On macOS, fervor boots aarch64 images inside a
   [Lima](https://lima-vm.io) VM with nested virtualization (M3 or newer,
   macOS 15+):
 
@@ -26,8 +29,8 @@ transfers the layers it does not have yet.
   pixi run lima-kvm    # /dev/kvm must be listed
   ```
 
-Firecracker (v1.17.0) and its CI guest kernel (6.18.51, aarch64) are
-downloaded and sha256-verified on first run.
+Firecracker (v1.17.0) and its CI guest kernel (6.18.51) for the image's
+architecture are downloaded and sha256-verified on first run.
 
 ## Development
 
@@ -39,9 +42,10 @@ pixi run fervor -- --help     # runs the freshly built binary
 pixi build                    # packages pixi-fervor as a .conda (pixi-build-rust)
 ```
 
-`pixi-fervor` embeds the Linux `fervor-init` (and, on macOS, `fervor-runner`),
-so the release binary is self-contained. Its `build.rs` cross-compiles them
-with `cargo zigbuild`, which the pixi environment provides.
+`pixi-fervor` embeds the Linux `fervor-init` for both guest architectures (and,
+on macOS, `fervor-runner`), so the release binary is self-contained. Its
+`build.rs` cross-compiles them with `cargo zigbuild`, which the pixi
+environment provides.
 
 ## Commands
 
@@ -102,7 +106,6 @@ conversions live in `fervor-vmm`; the domain does not depend on the guest ABI.
 
 ## Limitations
 
-- aarch64 guests only (no x86_64 kernel/Firecracker pins yet).
 - No networking besides `-p` forwards; the guest has no `/bin/sh` (scripts
   with `#!/bin/sh`, like conda-forge's `bin/flask`, do not run).
 - Python bytecode is compiled at first import on every boot.

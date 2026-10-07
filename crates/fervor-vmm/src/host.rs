@@ -5,6 +5,7 @@ use std::fs::OpenOptions;
 use camino::Utf8PathBuf;
 use fervor_domain::image::Image;
 use fervor_domain::machine::{RunOutcome, RunRequest};
+use fervor_domain::platform::GuestPlatform;
 use fervor_store::LayerStore;
 
 use crate::artifacts::ArtifactCache;
@@ -77,6 +78,9 @@ impl LocalRunHost {
     /// Makes the image's layers available on this host (importing missing
     /// digests from `source_root`), boots it and waits until the guest is gone.
     pub async fn run(&self, image: &Image, request: &RunRequest) -> Result<RunOutcome, RunError> {
+        if GuestPlatform::native() != Some(image.platform()) {
+            return Err(RunError::PlatformMismatch { image: image.platform(), host_arch: std::env::consts::ARCH });
+        }
         KvmDevice::check()?;
 
         let (host, image_owned) = (self.clone(), image.clone());

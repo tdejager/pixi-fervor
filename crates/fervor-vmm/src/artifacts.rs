@@ -10,18 +10,18 @@ use std::str::FromStr;
 use camino::Utf8PathBuf;
 use fervor_domain::digest::ArtifactDigest;
 use fervor_domain::machine::{ArtifactSet, KernelArtifact, PinnedArtifact};
-use fervor_domain::platform::{GuestPlatform, KernelFormat, UnsupportedPlatform};
+use fervor_domain::platform::{GuestPlatform, KernelFormat};
 use flate2::read::GzDecoder;
 use rattler_digest::Sha256;
 use tempfile::NamedTempFile;
 use url::Url;
 
 /// Pinned Firecracker and guest kernel releases for the runtime platform.
-pub fn pinned_artifacts(platform: GuestPlatform) -> Result<ArtifactSet, UnsupportedPlatform> {
+pub fn pinned_artifacts(platform: GuestPlatform) -> ArtifactSet {
     let url = |s: &str| Url::parse(s).expect("valid pinned url");
     let digest = |s: &str| ArtifactDigest::from_str(s).expect("valid pinned digest");
     match platform {
-        GuestPlatform::LinuxAarch64 => Ok(ArtifactSet {
+        GuestPlatform::LinuxAarch64 => ArtifactSet {
             firecracker: PinnedArtifact {
                 url: url("https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-aarch64.tgz"),
                 member: Some("release-v1.17.0-aarch64/firecracker-v1.17.0-aarch64".to_owned()),
@@ -36,9 +36,23 @@ pub fn pinned_artifacts(platform: GuestPlatform) -> Result<ArtifactSet, Unsuppor
                 format: KernelFormat::PeImage,
                 version: "6.18.51".to_owned(),
             },
-        }),
-        // No x86_64 pins yet: nothing in the POC boots there.
-        GuestPlatform::LinuxX86_64 => Err(UnsupportedPlatform(platform.to_string())),
+        },
+        GuestPlatform::LinuxX86_64 => ArtifactSet {
+            firecracker: PinnedArtifact {
+                url: url("https://github.com/firecracker-microvm/firecracker/releases/download/v1.17.0/firecracker-v1.17.0-x86_64.tgz"),
+                member: Some("release-v1.17.0-x86_64/firecracker-v1.17.0-x86_64".to_owned()),
+                sha256: digest("99ad0f5cd0514a88aad0e9ae8cfdb3cc3b4ab9d190e1194602406c786b5de7a5"),
+            },
+            kernel: KernelArtifact {
+                artifact: PinnedArtifact {
+                    url: url("https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/20260930-a738f18a8db0-0/x86_64/vmlinux-6.18.51"),
+                    member: None,
+                    sha256: digest("0545ba1781fc06cfa1d7699069057f4538103fd1644100cf0da434899a1ed447"),
+                },
+                format: KernelFormat::Vmlinux,
+                version: "6.18.51".to_owned(),
+            },
+        },
     }
 }
 

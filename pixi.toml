@@ -1,7 +1,7 @@
 [workspace]
 channels = ["conda-forge"]
 name = "fervor"
-platforms = ["osx-arm64", "linux-aarch64"]
+platforms = ["osx-arm64", "linux-aarch64", "linux-64"]
 version = "0.1.0"
 preview = ["pixi-build"]
 
@@ -18,13 +18,21 @@ name = "pixi-build-rust"
 [package.build.config]
 binaries = ["pixi-fervor"]
 
-# build.rs cross-compiles the embedded Linux binaries with cargo-zigbuild.
+# build.rs cross-compiles the embedded Linux binaries (aarch64 and x86_64)
+# with cargo-zigbuild; each non-native Linux target needs its Rust std.
 [package.build-dependencies]
 rust = "1.98.*"
 cargo-zigbuild = ">=0.23.4,<0.24"
 zig = ">=0.16.0,<0.17"
 
 [package.build-dependencies."if(host_platform == 'osx-arm64')"]
+rust-std-aarch64-unknown-linux-gnu = "1.98.*"
+rust-std-x86_64-unknown-linux-gnu = "1.98.*"
+
+[package.build-dependencies."if(host_platform == 'linux-aarch64')"]
+rust-std-x86_64-unknown-linux-gnu = "1.98.*"
+
+[package.build-dependencies."if(host_platform == 'linux-64')"]
 rust-std-aarch64-unknown-linux-gnu = "1.98.*"
 
 [tasks]
@@ -43,6 +51,18 @@ lima-kvm = { cmd = "limactl shell fervor -- ls -l /dev/kvm", description = "Chec
 
 [target.osx-arm64.dependencies]
 rust-std-aarch64-unknown-linux-gnu = ">=1.98.1,<2"
+rust-std-x86_64-unknown-linux-gnu = ">=1.98.1,<2"
+
+[target.linux-aarch64.dependencies]
+rust-std-x86_64-unknown-linux-gnu = ">=1.98.1,<2"
+
+[target.linux-64.dependencies]
+rust-std-aarch64-unknown-linux-gnu = ">=1.98.1,<2"
+
+# Activates CC to match conda's linker and sysroot; otherwise C dependencies
+# (aws-lc-sys) are compiled against the system glibc and fail to link.
+[target.linux.dependencies]
+c-compiler = ">=2.0.0,<3"
 
 [dependencies]
 rust = ">=1.98.1,<1.99"
