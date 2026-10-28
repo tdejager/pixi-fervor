@@ -3,8 +3,10 @@
 //! Lima mounts the macOS home directory read-only at the same path inside the
 //! VM, so the image directory, the build store and the embedded runner are
 //! all reachable without copying. The runner (a Linux build of fervor-vmm)
-//! imports missing layers from the build store, packs and boots the image,
-//! and writes the guest outcome to a per-run file inside the VM.
+//! imports missing layers (the image's and the run's) from the build store,
+//! packs and boots the image, and writes the guest outcome to a per-run file
+//! inside the VM. It runs as root through passwordless `sudo -n`, so it may
+//! set up `--network nat`; its cache is root's.
 //!
 //! Stdio is passed straight through: on a terminal ssh allocates a pty, so
 //! the console is live and Ctrl-C reaches the runner as a keystroke. Lima's
@@ -46,15 +48,19 @@ impl LimaRunHost {
     fn runner_command(&self, runner: &Utf8Path, image_dir: &Utf8Path, build_store: &Utf8Path, run: &RemoteRun, request: &RunRequest) -> Command {
         let mut command = Command::new("limactl");
         command
-            .args(["shell", "--workdir", "/", &self.instance, "--"])
+            .args(["shell", "--workdir", "/", &self.instance, "--", "sudo", "-n"])
             .arg(runner.as_str())
             .args(["run", image_dir.as_str(), "--source-store", build_store.as_str()])
             .args(["--outcome-file", &run.outcome_file])
             .args(["--vcpus", &request.machine.vcpus.0.to_string()])
             .args(["--memory", &request.machine.memory.0.to_string()])
-            .args(["--shutdown-grace-ms", &request.shutdown_grace.as_millis().to_string()]);
+            .args(["--shutdown-grace-ms", &request.shutdown_grace.as_millis().to_string()])
+            .args(["--network", &request.network.to_string()]);
         for forward in &request.forwards {
             command.args(["-p", &forward.to_string()]);
+        }
+        for layer in &request.layers {
+            command.args(["--run-layer", &layer.digest.to_string()]);
         }
         if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
             // Keep a SIGINT for our process group away from the ssh client;
@@ -64,10 +70,10 @@ impl LimaRunHost {
         command
     }
 
-    /// Reads and removes the outcome file the runner wrote for `run`.
+    /// Reads and removes the outcome file the runner (as root) wrote for `run`.
     async fn collect(&self, run: &RemoteRun) -> Result<Option<RunnerOutcome>, RunError> {
         let report = self
-            .helper(&format!("cat {0} && rm -f {0}", run.outcome_file))
+            .helper(&format!("sudo -n cat {0} && sudo -n rm -f {0}", run.outcome_file))
             .output()
             .await
             .map_err(|e| RunError::infrastructure("reading the run outcome from Lima", e))?;
@@ -132,7 +138,7 @@ impl LimaRunHost {
                 _ = stop.recv(), if !interrupted => {
                     interrupted = true;
                     // Best effort: if it fails the runner still stops when its session ends.
-                    let _ = self.helper(&format!("pkill -INT -f '{}'", run.pattern())).status().await;
+                    let _ = self.helper(&format!("sudo -n pkill -INT -f '{}'", run.pattern())).status().await;
                 }
             }
         };

@@ -5,6 +5,10 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub enum HostTreeError {
     #[error("`{0}` is not a directory")]
     NotADirectory(String),
+    #[error("`{0}` is not a regular file")]
+    NotAFile(String),
+    #[error("`{0}` cannot be the guest path of a file")]
+    NotAFilePath(String),
     #[error("{context}")]
     Infrastructure {
         context: String,

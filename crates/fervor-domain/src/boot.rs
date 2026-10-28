@@ -2,6 +2,8 @@
 //! `fervor-init`, the guest glibc (taken from the conda-forge sysroot) and a
 //! minimal `/etc`; everything else arrives through the layer stack.
 
+use serde::{Deserialize, Serialize};
+
 use crate::digest::{ArtifactDigest, LayerKey};
 use crate::environment::ResolvedPackage;
 use crate::files::{ArchiveEntry, EntryKind, FileContent, FileMode, FileOwner, FileSet, LayerEntry};
@@ -17,6 +19,42 @@ pub const LIB_DIR: &str = "/lib64";
 pub const HOSTNAME: &str = "fervor";
 /// Mount points `fervor-init` uses while assembling the stack.
 pub const STAGING_DIR: &str = "/fervor";
+/// Directories `fervor-init` mounts fresh filesystems on in the guest root;
+/// whatever a layer puts below them is hidden at run time.
+pub const RUNTIME_MOUNTS: [&str; 5] = ["/dev", "/proc", "/run", "/sys", "/tmp"];
+
+/// The runtime mount that hides `path`, if any.
+pub fn hidden_by_runtime_mount(path: &GuestPath) -> Option<&'static str> {
+    RUNTIME_MOUNTS
+        .into_iter()
+        .find(|mount| path.starts_with(&GuestPath::new(*mount).expect("valid path")))
+}
+
+/// What the boot layer's `fervor-init` understands. Recorded in the manifest
+/// so the host never hands an older init run-time settings it would silently
+/// ignore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct InitVersion(pub u16);
+
+impl InitVersion {
+    /// Images whose manifest records no version: the image pack only.
+    pub const LEGACY: Self = Self(1);
+    /// Reads the run pack (`/dev/vdc`): run-time files and networking.
+    pub const RUN_PACK: Self = Self(2);
+    /// The `fervor-init` this fervor embeds into new boot layers.
+    pub const CURRENT: Self = Self::RUN_PACK;
+
+    pub fn is_legacy(&self) -> bool {
+        *self == Self::LEGACY
+    }
+}
+
+impl Default for InitVersion {
+    fn default() -> Self {
+        Self::LEGACY
+    }
+}
 
 /// The init binary that runs as PID 1.
 #[derive(Debug, Clone)]
@@ -147,6 +185,15 @@ impl<'a> RuntimeObject<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_mounts_hide_paths_below_them_only() {
+        let hidden = |p: &str| hidden_by_runtime_mount(&GuestPath::new(p).unwrap());
+        assert_eq!(hidden("/run/config.json"), Some("/run"));
+        assert_eq!(hidden("/tmp"), Some("/tmp"));
+        assert_eq!(hidden("/runtime/config.json"), None);
+        assert_eq!(hidden("/etc/armada/provisioning.json"), None);
+    }
 
     #[test]
     fn runtime_objects_exclude_linker_scripts_and_archives() {

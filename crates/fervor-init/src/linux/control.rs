@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use fervor_guest_abi::{Backoff, CONTROL_PORT, GuestToHost, HOST_CID, HostToGuest};
 
-use super::entrypoint::Supervisor;
+use super::events::ShutdownRequest;
 use super::vsock::{VsockAddr, VsockStream};
 
 /// The host listens before it boots the VM; the retries only cover the
@@ -65,7 +65,7 @@ impl Control {
 
     /// Handles host requests on a background thread until the host closes
     /// the channel.
-    pub fn spawn_reader(&self, supervisor: Arc<Supervisor>) {
+    pub fn spawn_reader(&self, shutdown: Arc<ShutdownRequest>) {
         let stream = self
             .stream
             .lock()
@@ -89,7 +89,7 @@ impl Control {
                 };
                 match serde_json::from_str::<HostToGuest>(&line) {
                     Ok(HostToGuest::Shutdown { grace_ms }) => {
-                        supervisor.request_shutdown(Duration::from_millis(grace_ms));
+                        shutdown.request(Duration::from_millis(grace_ms));
                     }
                     Err(err) => {
                         eprintln!("fervor-init: ignoring malformed host message {line:?}: {err}")

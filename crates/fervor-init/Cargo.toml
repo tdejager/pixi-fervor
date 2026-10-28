@@ -1,6 +1,6 @@
 [package]
 name = "fervor-init"
-description = "PID 1 of a fervor guest: stacks the layer pack into an overlay root, runs the entrypoint and reports to the host"
+description = "PID 1 of a fervor guest: stacks the layer packs into an overlay root, supervises the entrypoint and its services and reports to the host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

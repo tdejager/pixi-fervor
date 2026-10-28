@@ -28,6 +28,11 @@ impl RunPaths {
         self.dir.join("firecracker.log")
     }
 
+    /// The run pack, written per boot.
+    pub fn run_pack(&self) -> Utf8PathBuf {
+        self.dir.join("run.img")
+    }
+
     /// Firecracker's vsock socket: host-initiated connections go here.
     pub fn vsock(&self) -> Utf8PathBuf {
         self.dir.join("vsock.sock")
@@ -45,11 +50,28 @@ pub struct FirecrackerConfig {
     #[serde(rename = "boot-source")]
     boot_source: BootSource,
     drives: Vec<Drive>,
+    #[serde(rename = "network-interfaces", skip_serializing_if = "Vec::is_empty")]
+    network_interfaces: Vec<NetworkInterface>,
     #[serde(rename = "machine-config")]
     machine_config: MachineConfig,
     vsock: Vsock,
     entropy: Entropy,
     logger: Logger,
+}
+
+/// The guest's `eth0`, backed by the run host's TAP device `host_dev_name`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NetworkInterface {
+    iface_id: &'static str,
+    host_dev_name: String,
+    guest_mac: String,
+}
+
+impl NetworkInterface {
+    pub fn new(host_dev_name: String, guest_mac: [u8; 6]) -> Self {
+        let mac: Vec<String> = guest_mac.iter().map(|b| format!("{b:02x}")).collect();
+        Self { iface_id: "eth0", host_dev_name, guest_mac: mac.join(":") }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -99,15 +121,25 @@ struct Logger {
 }
 
 impl FirecrackerConfig {
-    /// The boot layer is the read-only root drive (`/dev/vda`), the pack the
-    /// second read-only drive (`/dev/vdb`).
-    pub fn new(kernel: &Utf8Path, boot_layer: &Utf8Path, pack: &Utf8Path, machine: &MachineSpec, paths: &RunPaths) -> Self {
+    /// The boot layer is the read-only root drive (`/dev/vda`), the image pack
+    /// the second read-only drive (`/dev/vdb`), the run pack in `paths` the
+    /// third (`/dev/vdc`).
+    pub fn new(
+        kernel: &Utf8Path,
+        boot_layer: &Utf8Path,
+        pack: &Utf8Path,
+        network: Option<NetworkInterface>,
+        machine: &MachineSpec,
+        paths: &RunPaths,
+    ) -> Self {
         Self {
             boot_source: BootSource { kernel_image_path: kernel.to_owned(), boot_args: BOOT_ARGS },
             drives: vec![
                 Drive { drive_id: "boot", path_on_host: boot_layer.to_owned(), is_root_device: true, is_read_only: true },
                 Drive { drive_id: "pack", path_on_host: pack.to_owned(), is_root_device: false, is_read_only: true },
+                Drive { drive_id: "run", path_on_host: paths.run_pack(), is_root_device: false, is_read_only: true },
             ],
+            network_interfaces: network.into_iter().collect(),
             machine_config: MachineConfig { vcpu_count: machine.vcpus.0.get(), mem_size_mib: machine.memory.0.get() },
             vsock: Vsock { guest_cid: GUEST_CID, uds_path: paths.vsock() },
             entropy: Entropy {},

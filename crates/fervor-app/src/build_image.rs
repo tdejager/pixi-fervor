@@ -1,11 +1,12 @@
 //! Build an image: resolve → plan layers → reuse or build each layer →
-//! check path conflicts → assemble the image → save its manifest.
+//! add the system links layer → check path conflicts → assemble the image →
+//! save its manifest.
 
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use fervor_conda::{ContentsError, CondaClient, InstallTarget, RattlerPackageContents, RattlerResolver, ResolveError};
-use fervor_domain::boot::{BootLayerSpec, InitBinary};
+use fervor_domain::boot::{BootLayerSpec, InitBinary, InitVersion};
 use fervor_domain::entrypoint::{Argv, Entrypoint, EnvVars};
 use fervor_domain::environment::{EnvironmentSpec, ResolvedEnvironment};
 use fervor_domain::image::{Image, ImageError, LayerStack, ScratchSize};
@@ -15,6 +16,8 @@ use fervor_domain::layer::{
 };
 use fervor_domain::machine::ArtifactSet;
 use fervor_domain::path::GuestPath;
+use fervor_domain::service::{Journal, JournaldMissing, Services};
+use fervor_domain::system_links::SystemLinks;
 use fervor_layerfs::{BuildError, HostTreeError, HostTreeReader, SquashfsLayerBuilder};
 use fervor_store::{ImageDir, ImageDirError, LayerStore, StoreError};
 use futures::{StreamExt, TryStreamExt};
@@ -33,6 +36,10 @@ pub struct BuildImage {
     pub argv: Argv,
     pub env: EnvVars,
     pub workdir: GuestPath,
+    /// Started in order before the entrypoint.
+    pub services: Services,
+    /// Run `systemd-journald` (which the stack must provide) and send all output to it.
+    pub journal: bool,
     /// Placed on top of the package layers, in order.
     pub host_trees: Vec<HostTreeMount>,
     pub policy: SizeThresholdPolicy,
@@ -66,6 +73,8 @@ pub enum BuildImageError {
     ImageDir(#[from] ImageDirError),
     #[error(transparent)]
     Image(#[from] ImageError),
+    #[error(transparent)]
+    Journal(#[from] JournaldMissing),
     #[error("{0}")]
     Conflicts(PathConflicts),
 }
@@ -118,6 +127,12 @@ impl ImageBuilder {
             .buffered(Self::CONCURRENCY)
             .try_collect()
             .await?;
+        let journal = command.journal.then(|| Journal::locate(&self.prefix, stack.iter().map(|s| &s.index))).transpose()?;
+        // Directly above the boot layer, below everything else.
+        let links = SystemLinks::for_stack(&self.prefix, stack.iter().map(|s| &s.index))
+            .map(|links| self.system_links_layer(&links, progress))
+            .transpose()?;
+        let stack: Vec<StoredLayer> = links.into_iter().chain(stack).collect();
 
         let conflicts = PathConflicts::detect(std::iter::once(&boot.index).chain(stack.iter().map(|s| &s.index)));
         if !command.conflicts.admits(&conflicts) {
@@ -126,9 +141,32 @@ impl ImageBuilder {
 
         let entrypoint = Entrypoint::new(command.argv, command.env, command.workdir, &self.prefix);
         let layers = LayerStack::new(stack.into_iter().map(|stored| stored.layer).collect())?;
-        let image = Image::new(env.platform(), boot.layer, layers, entrypoint, command.scratch, command.artifacts)?;
+        let image = Image::new(
+            env.platform(),
+            boot.layer,
+            InitVersion::CURRENT,
+            layers,
+            entrypoint,
+            command.services,
+            journal,
+            command.scratch,
+            command.artifacts,
+        )?;
         ImageDir::new(command.output).save(&image)?;
         Ok(image)
+    }
+
+    fn system_links_layer(&self, links: &SystemLinks, progress: &dyn Fn(BuildEvent<'_>)) -> Result<StoredLayer, BuildImageError> {
+        let key = links.key(self.layout);
+        if let Some(stored) = self.store.lookup(&key)? {
+            progress(BuildEvent::LayerReused(&stored.layer));
+            return Ok(stored);
+        }
+        let started = Instant::now();
+        let blob = tokio::task::block_in_place(|| self.layers.build(&[links.files()]))?;
+        let stored = self.store.insert(key, LayerKind::SystemLinks, links.label(), blob)?;
+        progress(BuildEvent::LayerBuilt { layer: &stored.layer, elapsed: started.elapsed() });
+        Ok(stored)
     }
 
     async fn boot_layer(&self, env: &ResolvedEnvironment, progress: &dyn Fn(BuildEvent<'_>)) -> Result<StoredLayer, BuildImageError> {

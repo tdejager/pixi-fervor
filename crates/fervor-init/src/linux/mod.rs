@@ -2,60 +2,53 @@
 //! in both cases init syncs and reboots, which makes Firecracker exit.
 
 mod control;
-mod entrypoint;
+mod events;
 mod forward;
+mod journal;
 mod mounts;
+mod network;
+mod process;
+mod supervisor;
 mod system;
 mod vsock;
 
 use std::fmt;
-use std::fs::File;
-use std::sync::Arc;
 use std::time::Duration;
 
-use fervor_guest_abi::{ExitReport, GuestToHost, PACK_DEVICE, PackHeader};
-use rustix::process::Pid;
+use fervor_guest_abi::{ExitReport, GuestConfig, GuestToHost, PACK_DEVICE, RUN_DEVICE, RunConfig};
 
 use self::control::Control;
-use self::entrypoint::Supervisor;
+use self::events::Wakeups;
 use self::forward::ForwardListener;
-use self::mounts::{EarlyMounts, RootAssembler};
-use self::system::{Hostname, Loopback};
+use self::mounts::{EarlyMounts, Pack, RootAssembler};
+use self::network::{Ethernet, Loopback};
+use self::supervisor::Supervisor;
+use self::system::Hostname;
 
-/// PID 1: boots the guest, supervises the entrypoint and reports its fate to
-/// the host.
+/// PID 1: boots the guest, supervises the entrypoint and its services and
+/// reports the entrypoint's fate to the host.
 pub struct Init {
     control: Option<Control>,
-    supervisor: Arc<Supervisor>,
 }
 
 impl Init {
     pub fn run() -> ! {
+        // First: every thread init starts must inherit the blocked SIGCHLD.
+        let wakeups = Wakeups::new();
         let early_mounts = EarlyMounts::mount();
-        let init = Self::connect();
-        init.supervise(early_mounts);
+        let init = Self {
+            control: Control::connect(),
+        };
+        init.supervise(early_mounts.and(wakeups));
         Self::reboot()
     }
 
-    /// Opens the control channel (if the host answers) and starts handling
-    /// its requests.
-    fn connect() -> Self {
-        let init = Self {
-            control: Control::connect(),
-            supervisor: Arc::new(Supervisor::default()),
-        };
-        if let Some(control) = &init.control {
-            control.spawn_reader(Arc::clone(&init.supervisor));
-        }
-        init
-    }
-
     /// Boots, runs the entrypoint to completion and reports the outcome.
-    fn supervise(&self, early_mounts: Result<(), Error>) {
-        let report = match early_mounts.and_then(|()| self.start()) {
-            Ok(pid) => {
+    fn supervise(&self, wakeups: Result<Wakeups, Error>) {
+        let report = match wakeups.and_then(|wakeups| self.start(wakeups)) {
+            Ok(supervisor) => {
                 self.send(&GuestToHost::Ready);
-                self.supervisor.wait_for_exit(pid)
+                supervisor.run()
             }
             Err(err) => {
                 eprintln!("fervor-init: {err}");
@@ -67,30 +60,30 @@ impl Init {
         self.send(&GuestToHost::Exited { report });
     }
 
-    /// Assembles the root filesystem and spawns the entrypoint inside it.
-    fn start(&self) -> Result<Pid, Error> {
+    /// Assembles the root filesystem, configures the network and starts the
+    /// journal, the services and the entrypoint inside it.
+    fn start(&self, wakeups: Wakeups) -> Result<Supervisor, Error> {
+        if let Some(control) = &self.control {
+            control.spawn_reader(wakeups.shutdown());
+        }
         Hostname::from_boot_layer()?.apply()?;
         Loopback::up()?;
 
-        let (pack, header) = Self::read_pack()?;
+        let image = Pack::<GuestConfig>::open(PACK_DEVICE)?;
+        let run = Pack::<RunConfig>::open(RUN_DEVICE)?;
         let root = RootAssembler {
-            pack: &pack,
-            header: &header,
+            image: &image,
+            run: &run,
         }
         .assemble()?;
-        drop(pack);
+        let (guest, run) = (image.into_config(), run.into_config());
         root.switch()?;
 
+        if let Some(network) = &run.network {
+            Ethernet::configure(network)?;
+        }
         ForwardListener::bind()?.spawn();
-        self.supervisor.spawn(header.config())
-    }
-
-    fn read_pack() -> Result<(File, PackHeader), Error> {
-        let pack =
-            File::open(PACK_DEVICE).context(|| format!("opening the pack device {PACK_DEVICE}"))?;
-        let header = PackHeader::read_from(&pack)
-            .context(|| format!("reading the pack header from {PACK_DEVICE}"))?;
-        Ok((pack, header))
+        Supervisor::start(wakeups, guest)
     }
 
     fn send(&self, message: &GuestToHost) {

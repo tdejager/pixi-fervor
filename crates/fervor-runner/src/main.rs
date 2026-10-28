@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use clap::{Parser, Subcommand};
-use fervor_domain::machine::{MachineSpec, MemoryMib, PortForward, RunRequest, VcpuCount};
+use fervor_domain::digest::LayerDigest;
+use fervor_domain::machine::{MachineSpec, MemoryMib, NetworkMode, PortForward, RunRequest, VcpuCount};
 use fervor_store::{ImageDir, LayerStore};
-use fervor_vmm::{LocalRunHost, RunnerOutcome};
+use fervor_vmm::{LocalRunHost, RunError, RunnerOutcome};
 use miette::{IntoDiagnostic, WrapErr};
 
 #[derive(Parser)]
@@ -57,15 +58,24 @@ struct RequestArgs {
     /// Time the entrypoint gets between SIGTERM and SIGKILL on shutdown.
     #[arg(long, default_value_t = 10_000)]
     shutdown_grace_ms: u64,
+    /// `none` (loopback only) or `nat` (outbound through this host; needs CAP_NET_ADMIN).
+    #[arg(long, default_value_t = NetworkMode::default())]
+    network: NetworkMode,
+    /// Layer blob (sha256) stacked on top of the image for this run only, bottom → top;
+    /// imported from the source store if missing.
+    #[arg(long = "run-layer", value_name = "DIGEST")]
+    run_layers: Vec<LayerDigest>,
 }
 
 impl RequestArgs {
-    fn into_request(self) -> RunRequest {
-        RunRequest {
+    fn into_request(self, host: &LocalRunHost) -> Result<RunRequest, RunError> {
+        Ok(RunRequest {
             machine: MachineSpec::new(VcpuCount(self.vcpus), MemoryMib(self.memory)),
             forwards: self.forwards,
             shutdown_grace: Duration::from_millis(self.shutdown_grace_ms),
-        }
+            network: self.network,
+            layers: self.run_layers.into_iter().map(|digest| host.run_layer(digest)).collect::<Result<_, _>>()?,
+        })
     }
 }
 
@@ -84,11 +94,11 @@ async fn main() -> miette::Result<()> {
         .load()
         .into_diagnostic()
         .wrap_err_with(|| format!("loading the image in {}", args.image_dir))?;
-    let request = args.request.into_request();
     let store = LayerStore::open(&args.cache_dir)
         .into_diagnostic()
         .wrap_err_with(|| format!("opening the store at {}", args.cache_dir))?;
     let host = LocalRunHost::new(store, args.source_store);
+    let request = args.request.into_request(&host).into_diagnostic().wrap_err("loading the run layers")?;
 
     let outcome = host
         .run(&image, &request)

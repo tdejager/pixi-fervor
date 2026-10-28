@@ -8,7 +8,7 @@ use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, symlink};
 use std::path::{Path, PathBuf};
 
-use fervor_guest_abi::{PACK_DEVICE, PackEntry, PackHeader};
+use fervor_guest_abi::{GuestConfig, PackConfig, PackEntry, PackHeader, RunConfig};
 use rustix::io::Errno;
 use rustix::mount::{
     FsMountFlags, FsOpenFlags, MountAttrFlags, MountFlags, MoveMountFlags, UnmountFlags,
@@ -22,7 +22,9 @@ use crate::plan::{LoopRange, OverlayLowers};
 /// Staging area: an empty directory in the boot layer, covered by a tmpfs so
 /// that mount points can be created below it.
 const STAGING: &str = "/fervor";
-const LAYERS: &str = "/fervor/l";
+/// Mount points of the image pack's layers (`<n>`) and the run pack's.
+const IMAGE_LAYERS: &str = "/fervor/l";
+const RUN_LAYERS: &str = "/fervor/r";
 const BOOT_ROOT: &str = "/fervor/boot";
 const SCRATCH: &str = "/fervor/scratch";
 const NEW_ROOT: &str = "/fervor/root";
@@ -66,6 +68,9 @@ impl EarlyMounts {
     pub fn mount() -> Result<(), Error> {
         MountPoint::new("/proc").mount_fs("proc", PSEUDO, None)?;
         MountPoint::new("/sys").mount_fs("sysfs", PSEUDO, None)?;
+        // systemd-journald resolves its cgroup and refuses to start without
+        // the unified hierarchy.
+        MountPoint::new("/sys/fs/cgroup").mount_fs("cgroup2", PSEUDO, None)?;
         // The kernel mounts devtmpfs on /dev itself when built with
         // CONFIG_DEVTMPFS_MOUNT; mounting it again there reports EBUSY.
         match mount(
@@ -114,39 +119,86 @@ impl EarlyMounts {
     }
 }
 
-/// Builds the overlay root from the layers of an open pack device.
+/// An open pack device and its header.
+pub struct Pack<C> {
+    device: &'static str,
+    file: File,
+    header: PackHeader<C>,
+}
+
+impl<C: PackConfig + Clone> Pack<C> {
+    pub fn open(device: &'static str) -> Result<Self, Error> {
+        let file = File::open(device).context(|| format!("opening the pack device {device}"))?;
+        let header = PackHeader::read_from(&file)
+            .context(|| format!("reading the pack header from {device}"))?;
+        Ok(Self {
+            device,
+            file,
+            header,
+        })
+    }
+
+    /// Closes the device (mounted layers keep their loop devices) and keeps
+    /// the config.
+    pub fn into_config(self) -> C {
+        self.header.config().clone()
+    }
+
+    /// Loop-mounts every layer at `<dir>/<index>`, bottom → top.
+    fn mount_layers(
+        &self,
+        kind: &'static str,
+        dir: &str,
+        loop_control: &LoopControl,
+    ) -> Result<Vec<PathBuf>, Error> {
+        MountPoint::new(dir).create(0o755)?;
+        self.header
+            .layers()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                LayerMount {
+                    kind,
+                    device: self.device,
+                    index,
+                    entry,
+                }
+                .mount(loop_control, &self.file, dir)
+            })
+            .collect()
+    }
+}
+
+/// Builds the overlay root from the layers of the image and run packs.
 pub struct RootAssembler<'a> {
-    pub pack: &'a File,
-    pub header: &'a PackHeader,
+    pub image: &'a Pack<GuestConfig>,
+    pub run: &'a Pack<RunConfig>,
 }
 
 impl RootAssembler<'_> {
-    /// Loop-mounts every pack layer and stacks them with the boot root under
-    /// a tmpfs-backed writable overlay at [`NEW_ROOT`].
+    /// Loop-mounts every pack layer and stacks them (run layers on top) with
+    /// the boot root under a tmpfs-backed writable overlay at [`NEW_ROOT`].
     pub fn assemble(&self) -> Result<NewRoot, Error> {
         MountPoint::new(STAGING).mount_fs(
             "tmpfs",
             MountFlags::NOSUID.union(MountFlags::NODEV),
             Some(c"mode=0700"),
         )?;
-        for dir in [LAYERS, BOOT_ROOT, SCRATCH, NEW_ROOT] {
+        for dir in [BOOT_ROOT, SCRATCH, NEW_ROOT] {
             MountPoint::new(dir).create(0o755)?;
         }
         // Non-recursive: only the boot squashfs, without /proc, /fervor, ….
         mount_bind("/", BOOT_ROOT).context(|| format!("binding the boot root to {BOOT_ROOT}"))?;
 
         let loop_control = LoopControl::open()?;
-        let layer_mounts = self
-            .header
-            .layers()
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| LayerMount { index, entry }.mount(&loop_control, self.pack))
-            .collect::<Result<Vec<_>, _>>()?;
+        let image_layers = self
+            .image
+            .mount_layers("image", IMAGE_LAYERS, &loop_control)?;
+        let run_layers = self.run.mount_layers("run", RUN_LAYERS, &loop_control)?;
 
-        let scratch = Scratch::mount(self.header.config().scratch_size_mib)?;
+        let scratch = Scratch::mount(self.image.header.config().scratch_size_mib)?;
         let overlay = Overlay {
-            lowers: OverlayLowers::new(&layer_mounts, Path::new(BOOT_ROOT)),
+            lowers: OverlayLowers::new(&image_layers, &run_layers, Path::new(BOOT_ROOT)),
             scratch,
         };
         let root = NewRoot {
@@ -192,7 +244,12 @@ struct LoopDevice {
 }
 
 impl LoopDevice {
-    fn attach(control: &LoopControl, pack: &File, entry: &PackEntry) -> Result<Self, Error> {
+    fn attach(
+        control: &LoopControl,
+        pack: &File,
+        device: &str,
+        entry: &PackEntry,
+    ) -> Result<Self, Error> {
         let path = PathBuf::from(format!("/dev/loop{}", control.free_device_number()?));
         // Read-only: the kernel refuses to mount a block device that is open
         // for writing elsewhere.
@@ -224,7 +281,7 @@ impl LoopDevice {
         if unsafe { libc::ioctl(open.as_raw_fd(), LOOP_CONFIGURE, &config) } < 0 {
             return Err(io::Error::last_os_error()).context(|| {
                 format!(
-                    "configuring {} on {PACK_DEVICE} at offset {} ({} bytes)",
+                    "configuring {} on {device} at offset {} ({} bytes)",
                     path.display(),
                     entry.offset,
                     entry.len
@@ -235,20 +292,24 @@ impl LoopDevice {
     }
 }
 
-/// One pack layer, mounted read-only at `/fervor/l/<index>`.
+/// One layer of a pack, mounted read-only at `<dir>/<index>`.
 struct LayerMount<'a> {
+    /// `image` or `run`, for messages.
+    kind: &'static str,
+    device: &'a str,
     index: usize,
     entry: &'a PackEntry,
 }
 
 impl LayerMount<'_> {
     /// Mounts the layer's SquashFS and returns its mount point.
-    fn mount(&self, loop_control: &LoopControl, pack: &File) -> Result<PathBuf, Error> {
-        let target = PathBuf::from(format!("{LAYERS}/{}", self.index));
+    fn mount(&self, loop_control: &LoopControl, pack: &File, dir: &str) -> Result<PathBuf, Error> {
+        let target = PathBuf::from(format!("{dir}/{}", self.index));
         MountPoint::new(&target).create(0o755)?;
         self.mount_at(loop_control, pack, &target).map_err(|err| {
             Error::msg(format!(
-                "mounting layer {} ({}): {err}",
+                "mounting {} layer {} ({}): {err}",
+                self.kind,
                 self.index,
                 self.short_digest()
             ))
@@ -265,7 +326,7 @@ impl LayerMount<'_> {
         if self.entry.len == 0 {
             return Err(Error::msg("the layer is empty"));
         }
-        let device = LoopDevice::attach(loop_control, pack, self.entry)?;
+        let device = LoopDevice::attach(loop_control, pack, self.device, self.entry)?;
         mount(&device.path, target, "squashfs", MountFlags::RDONLY, None).context(|| {
             format!(
                 "mounting {} (squashfs) on {}",

@@ -10,7 +10,8 @@ use fervor_domain::layer::HostTreeSnapshot;
 use fervor_domain::path::GuestPath;
 use sha2::{Digest, Sha256};
 
-/// Snapshots host directories by walking them in sorted order.
+/// Snapshots host directories by walking them in sorted order, or single
+/// host files.
 ///
 /// Ownership and mtimes are dropped and modes normalized (0755 for
 /// directories and executables, 0644 otherwise), so the snapshot and its
@@ -29,7 +30,7 @@ impl HostTreeReader {
         let mut walk = Walk {
             mount_at,
             entries: Vec::new(),
-            hasher: TreeHasher::new(),
+            hasher: TreeHasher::new(b"fervor/host-tree"),
         };
         walk.entries.push(LayerEntry {
             path: mount_at.clone(),
@@ -47,6 +48,51 @@ impl HostTreeReader {
                 entries: walk.entries,
             },
         })
+    }
+
+    /// Snapshots the regular file `source` (symlinks followed) as the file
+    /// `path` in the guest. Parent directories are not listed: the layer
+    /// builder creates missing ones with mode 0755.
+    pub fn snapshot_file(
+        source: &Utf8Path,
+        path: &GuestPath,
+    ) -> Result<HostTreeSnapshot, HostTreeError> {
+        if path.is_root() {
+            return Err(HostTreeError::NotAFilePath(path.to_string()));
+        }
+        let meta = fs::metadata(source)
+            .ok()
+            .filter(|m| m.is_file())
+            .ok_or_else(|| HostTreeError::NotAFile(source.to_string()))?;
+        let mode = normalized_file_mode(&meta);
+        // A different domain than directory trees: a file and a directory
+        // holding it never share a digest.
+        let mut hasher = TreeHasher::new(b"fervor/host-file");
+        hasher.entry("", b'f', mode, &TreeHasher::file_content(source)?);
+        Ok(HostTreeSnapshot {
+            source: source.to_owned(),
+            mount_at: path.clone(),
+            digest: hasher.finish(),
+            files: FileSet {
+                owner: FileOwner::HostTree(path.clone()),
+                entries: vec![LayerEntry {
+                    path: path.clone(),
+                    kind: EntryKind::File {
+                        content: FileContent::HostFile(source.to_owned()),
+                        mode,
+                    },
+                }],
+            },
+        })
+    }
+}
+
+/// 0755 for files with any exec bit, 0644 otherwise.
+fn normalized_file_mode(meta: &fs::Metadata) -> FileMode {
+    if meta.permissions().mode() & 0o111 != 0 {
+        FileMode::EXECUTABLE
+    } else {
+        FileMode::REGULAR
     }
 }
 
@@ -107,11 +153,7 @@ impl Walk<'_> {
                     .entry(&relative, b'l', FileMode::new(0o777), target.as_bytes());
                 EntryKind::Symlink { target }
             } else if file_type.is_file() {
-                let mode = if meta.permissions().mode() & 0o111 != 0 {
-                    FileMode::EXECUTABLE
-                } else {
-                    FileMode::REGULAR
-                };
+                let mode = normalized_file_mode(&meta);
                 let content = TreeHasher::file_content(&host)?;
                 self.hasher.entry(&relative, b'f', mode, &content);
                 EntryKind::File {
@@ -138,9 +180,9 @@ impl Walk<'_> {
 struct TreeHasher(Sha256);
 
 impl TreeHasher {
-    fn new() -> Self {
+    fn new(domain: &[u8]) -> Self {
         let mut hasher = Self(Sha256::new());
-        hasher.bytes(b"fervor/host-tree");
+        hasher.bytes(domain);
         hasher
     }
 
@@ -300,5 +342,93 @@ mod tests {
                 Err(HostTreeError::NotADirectory(_))
             ));
         }
+    }
+
+    fn file_digest(source: &Utf8Path) -> TreeDigest {
+        let path = GuestPath::new("/etc/app/config.toml").unwrap();
+        HostTreeReader::snapshot_file(source, &path).unwrap().digest
+    }
+
+    #[test]
+    fn file_digest_depends_on_content_and_exec_bit_only() {
+        let (_dir, root) = tree();
+        let base = file_digest(&root.join("pkg/sub/data.txt"));
+
+        // Same bytes elsewhere on the host, older mtime: same layer.
+        fs::write(root.join("copy.txt"), "data").unwrap();
+        File::options()
+            .write(true)
+            .open(root.join("copy.txt"))
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(file_digest(&root.join("copy.txt")), base);
+        // A symlink is followed.
+        std::os::unix::fs::symlink(root.join("copy.txt"), root.join("link.txt")).unwrap();
+        assert_eq!(file_digest(&root.join("link.txt")), base);
+
+        fs::set_permissions(root.join("copy.txt"), fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(file_digest(&root.join("copy.txt")), base);
+        fs::write(root.join("pkg/sub/data.txt"), "DATA").unwrap();
+        assert_ne!(file_digest(&root.join("pkg/sub/data.txt")), base);
+
+        // A directory holding just that file is a different tree.
+        let only = root.join("only");
+        fs::create_dir(&only).unwrap();
+        fs::write(only.join("x"), "data").unwrap();
+        assert_ne!(digest(&only), base);
+    }
+
+    #[test]
+    fn file_layer_gets_its_parent_directories() {
+        use backhand::{FilesystemReader, InnerNode};
+
+        let (_dir, root) = tree();
+        let path = GuestPath::new("/etc/app/run.sh").unwrap();
+        let snapshot = HostTreeReader::snapshot_file(&root.join("run.sh"), &path).unwrap();
+        assert_eq!(snapshot.files.owner, FileOwner::HostTree(path.clone()));
+        let blob = crate::SquashfsLayerBuilder::new(root.clone())
+            .build(&[snapshot.files])
+            .unwrap();
+
+        let reader =
+            FilesystemReader::from_reader(io::BufReader::new(File::open(&blob.path).unwrap()))
+                .unwrap();
+        let nodes: Vec<(String, u16, bool)> = reader
+            .files()
+            .map(|n| {
+                let is_dir = matches!(n.inner, InnerNode::Dir(_));
+                (
+                    n.fullpath.display().to_string(),
+                    n.header.permissions,
+                    is_dir,
+                )
+            })
+            .collect();
+        assert_eq!(
+            nodes,
+            [
+                ("/".to_owned(), 0o755, true),
+                ("/etc".to_owned(), 0o755, true),
+                ("/etc/app".to_owned(), 0o755, true),
+                ("/etc/app/run.sh".to_owned(), 0o755, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_snapshot_needs_a_regular_file_and_a_file_path() {
+        let (_dir, root) = tree();
+        let path = GuestPath::new("/etc/x").unwrap();
+        for source in [root.join("nope"), root.join("pkg")] {
+            assert!(matches!(
+                HostTreeReader::snapshot_file(&source, &path),
+                Err(HostTreeError::NotAFile(_))
+            ));
+        }
+        assert!(matches!(
+            HostTreeReader::snapshot_file(&root.join("app.py"), &GuestPath::new("/").unwrap()),
+            Err(HostTreeError::NotAFilePath(_))
+        ));
     }
 }

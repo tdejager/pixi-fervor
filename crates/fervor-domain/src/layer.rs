@@ -13,6 +13,7 @@ use crate::nonempty::NonEmpty;
 use crate::path::GuestPath;
 use crate::platform::GuestPlatform;
 use crate::size::ByteSize;
+use crate::system_links::SystemLink;
 
 /// Where the environment is installed inside the guest. Prefix placeholders
 /// are replaced with this path, so it is part of every package layer key.
@@ -67,6 +68,8 @@ pub enum LayerKeyInput<'a> {
     Packages { prefix: &'a EnvPrefix, members: &'a [MemberKey] },
     HostTree { mount_at: &'a GuestPath, tree: TreeDigest },
     Boot { platform: GuestPlatform, sysroot: PackageSha256, init: ArtifactDigest },
+    /// Sorted by path.
+    SystemLinks { links: &'a [SystemLink] },
 }
 
 impl LayerKey {
@@ -98,6 +101,12 @@ impl LayerKey {
                     .bytes(&sysroot.to_bytes())
                     .bytes(&init.to_bytes());
             }
+            LayerKeyInput::SystemLinks { links } => {
+                hasher.str("system-links").u64(links.len() as u64);
+                for link in links {
+                    hasher.str(link.path.as_str()).str(link.target.as_str());
+                }
+            }
         }
         Self::from_hash(hasher.finish())
     }
@@ -114,6 +123,8 @@ pub enum LayerKind {
     SmallGroup,
     /// A directory copied from the host.
     HostTree,
+    /// `/bin/sh` and friends, linked into the environment.
+    SystemLinks,
 }
 
 /// A host directory, scanned and hashed, ready to become a layer.

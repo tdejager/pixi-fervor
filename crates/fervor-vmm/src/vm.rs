@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 use crate::error::RunError;
-use crate::firecracker::{FirecrackerConfig, RunPaths};
+use crate::firecracker::{FirecrackerConfig, NetworkInterface, RunPaths};
 use crate::forward::{GuestConnector, PortForwarder};
 use crate::outcome::guest_exit;
 
@@ -33,16 +33,16 @@ pub(crate) struct VmFiles<'a> {
     pub pack: &'a Utf8Path,
 }
 
-/// The per-run directory holding Firecracker's config, log and sockets;
-/// removed when dropped.
-struct RunDir {
+/// The per-run directory holding Firecracker's config, log, sockets and the
+/// run pack; removed when dropped.
+pub(crate) struct RunDir {
     _dir: TempDir,
     paths: RunPaths,
 }
 
 impl RunDir {
-    /// Creates the directory with the config for `files` and an empty log.
-    fn create(files: &VmFiles<'_>, request: &RunRequest) -> Result<Self, RunError> {
+    /// Creates the directory with an empty log.
+    pub(crate) fn create() -> Result<Self, RunError> {
         let dir = tempfile::Builder::new()
             .prefix("fervor-run-")
             .tempdir()
@@ -51,12 +51,19 @@ impl RunDir {
             RunError::infrastructure("creating the run directory", io::Error::other(format!("{} is not UTF-8", p.display())))
         })?;
         let paths = RunPaths::new(path);
-
-        let config = FirecrackerConfig::new(files.kernel, files.boot_layer, files.pack, &request.machine, &paths);
-        std::fs::write(paths.config(), config.to_json())
-            .map_err(|e| RunError::infrastructure(format!("writing {}", paths.config()), e))?;
         std::fs::File::create(paths.log()).map_err(|e| RunError::infrastructure(format!("creating {}", paths.log()), e))?;
         Ok(Self { _dir: dir, paths })
+    }
+
+    pub(crate) fn paths(&self) -> &RunPaths {
+        &self.paths
+    }
+
+    /// Writes Firecracker's config for `files`; the run pack must be in place.
+    fn write_config(&self, files: &VmFiles<'_>, network: Option<NetworkInterface>, request: &RunRequest) -> Result<(), RunError> {
+        let paths = &self.paths;
+        let config = FirecrackerConfig::new(files.kernel, files.boot_layer, files.pack, network, &request.machine, paths);
+        std::fs::write(paths.config(), config.to_json()).map_err(|e| RunError::infrastructure(format!("writing {}", paths.config()), e))
     }
 
     /// Firecracker exited on its own before the guest connected; its log says why.
@@ -79,13 +86,18 @@ pub(crate) struct VmSession<'a> {
 }
 
 impl<'a> VmSession<'a> {
-    pub(crate) async fn prepare(files: VmFiles<'a>, request: &RunRequest) -> Result<Self, RunError> {
-        // Before anything needs cleaning up: from here on a signal is handled
-        // (pending ones are seen by `run`), not fatal.
-        let signals = Signals::install()?;
-        let run_dir = RunDir::create(&files, request)?;
+    /// `signals` must be installed before anything that needs cleaning up
+    /// (such as the network) exists: from then on a signal is handled
+    /// (pending ones are seen by `run`), not fatal.
+    pub(crate) async fn prepare(
+        signals: Signals,
+        run_dir: RunDir,
+        files: VmFiles<'a>,
+        network: Option<NetworkInterface>,
+        request: &RunRequest,
+    ) -> Result<Self, RunError> {
+        run_dir.write_config(&files, network, request)?;
         let paths = &run_dir.paths;
-
         let control = UnixListener::bind(paths.control_socket())
             .map_err(|e| RunError::infrastructure(format!("binding {}", paths.control_socket()), e))?;
         let guest = GuestConnector::new(paths.vsock());
@@ -266,14 +278,15 @@ impl ControlSession {
     }
 }
 
-struct Signals {
+/// SIGINT, SIGTERM and SIGHUP, each a request to shut the guest down.
+pub(crate) struct Signals {
     interrupt: Signal,
     terminate: Signal,
     hangup: Signal,
 }
 
 impl Signals {
-    fn install() -> Result<Self, RunError> {
+    pub(crate) fn install() -> Result<Self, RunError> {
         let install = |kind| signal(kind).map_err(|e| RunError::infrastructure("installing signal handlers", e));
         Ok(Self {
             interrupt: install(SignalKind::interrupt())?,

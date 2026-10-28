@@ -1,0 +1,60 @@
+context:
+  version: "262.1"
+  # systemd's private shared library tag (meson `shared-lib-tag`, defaults to the major version).
+  shared_lib_tag: "262"
+
+package:
+  name: systemd-journald
+  version: ${{ version }}
+
+source:
+  url: https://github.com/systemd/systemd/archive/v${{ version }}.tar.gz
+  sha256: 100fc873b848b9b0297d8a705e8e2ed326256c8483d9960ee1ffe264c8a5c3e3
+
+build:
+  number: 0
+  skip:
+    - not linux
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ stdlib('c') }}
+    - coreutils
+    - gperf
+    - jinja2
+    - meson
+    - ninja
+    - patchelf
+    - pkg-config
+    - python
+  host:
+    # Headers only: systemd dlopen()s libzstd at runtime (journal compression);
+    # zstd's run_exports make it a run dependency.
+    - zstd
+
+tests:
+  - package_contents:
+      strict: true
+      files:
+        - bin/journalctl
+        - lib/systemd/systemd-journald
+        - lib/systemd/libsystemd-shared-${{ shared_lib_tag }}.so
+  - script:
+      - journalctl --version
+
+about:
+  homepage: https://systemd.io/
+  repository: https://github.com/systemd/systemd
+  license: LGPL-2.1-or-later AND GPL-2.0-or-later
+  license_file:
+    - LICENSE.LGPL2.1
+    - LICENSE.GPL2
+  summary: systemd-journald and journalctl, built standalone for fervor guests
+  description: |
+    The systemd journal daemon (lib/systemd/systemd-journald), journalctl, and the
+    private libsystemd-shared library they link. Runs without systemd as PID 1:
+    journald binds its own sockets under /run/systemd/journal when not socket
+    activated. Journal paths (/run/log/journal, /var/log/journal, /run/systemd/journal,
+    /etc/machine-id) and journald.conf lookup (/etc/systemd/journald.conf and the
+    usual /run, /usr/local/lib, /usr/lib drop-in dirs) are absolute, not in the prefix.
