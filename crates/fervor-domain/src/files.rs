@@ -52,6 +52,7 @@ pub enum FileOwner {
     Package(String),
     HostTree(GuestPath),
     Boot,
+    SystemLinks,
 }
 
 impl FileOwner {
@@ -66,6 +67,7 @@ impl std::fmt::Display for FileOwner {
             Self::Package(name) => write!(f, "package {name}"),
             Self::HostTree(path) => write!(f, "host tree at {path}"),
             Self::Boot => write!(f, "boot layer"),
+            Self::SystemLinks => write!(f, "system links"),
         }
     }
 }

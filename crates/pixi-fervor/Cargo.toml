@@ -22,4 +22,5 @@ fervor-vmm = { workspace = true }
 miette = { workspace = true }
 rattler_conda_types = { workspace = true }
 serde_json = { workspace = true }
+shell-words = { workspace = true }
 tokio = { workspace = true }

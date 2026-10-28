@@ -7,8 +7,9 @@
 //!
 //! Model modules:
 //! - [`environment`]: which exact packages make up a guest
-//! - [`layer`] / [`files`] / [`boot`]: how files become content-addressed layers
+//! - [`layer`] / [`files`] / [`boot`] / [`system_links`]: how files become content-addressed layers
 //! - [`image`] / [`manifest`]: the aggregate root that gets built, moved and booted
+//! - [`service`]: what runs next to the entrypoint (services, journal)
 //! - [`machine`]: how an image is run and what happened
 
 pub mod boot;
@@ -23,4 +24,6 @@ pub mod manifest;
 pub mod nonempty;
 pub mod path;
 pub mod platform;
+pub mod service;
 pub mod size;
+pub mod system_links;

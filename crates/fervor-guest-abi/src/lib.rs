@@ -8,14 +8,16 @@ pub mod control;
 pub mod pack;
 
 pub use backoff::{Backoff, Retry};
-pub use config::GuestConfig;
+pub use config::{GuestConfig, JournalConfig, NetworkConfig, RunConfig, ServiceConfig};
 pub use control::{ExitReport, ForwardPreamble, GuestToHost, HostToGuest};
-pub use pack::{PackEntry, PackError, PackHeader};
+pub use pack::{PackConfig, PackEntry, PackError, PackHeader};
 
 /// Block device of the read-only boot layer (kernel `root=`).
 pub const BOOT_DEVICE: &str = "/dev/vda";
 /// Block device holding the packed layers of the image.
 pub const PACK_DEVICE: &str = "/dev/vdb";
+/// Block device holding the run pack: per-run config and layers.
+pub const RUN_DEVICE: &str = "/dev/vdc";
 
 /// vsock CID of the host side (fixed by virtio-vsock).
 pub const HOST_CID: u32 = 2;

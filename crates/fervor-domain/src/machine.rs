@@ -10,8 +10,10 @@ use rattler_conda_types::Version;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::digest::ArtifactDigest;
+use crate::digest::{ArtifactDigest, LayerDigest};
+use crate::layer::BuiltLayer;
 use crate::platform::KernelFormat;
+use crate::size::ByteSize;
 
 /// A file downloaded from `url`, optionally extracted from a `.tgz` at
 /// `member`, whose bytes must hash to `sha256`.
@@ -108,6 +110,60 @@ impl fmt::Display for PortForward {
     }
 }
 
+/// How the guest reaches the network.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NetworkMode {
+    /// Loopback only; the host reaches guest ports through port forwards.
+    #[default]
+    None,
+    /// A virtio-net interface whose traffic the run host NATs to its own
+    /// network: outbound connections only.
+    Nat,
+}
+
+impl NetworkMode {
+    /// The command-line names, in declaration order.
+    pub const NAMES: [&str; 2] = ["none", "nat"];
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("`{0}` is not a network mode (expected `none` or `nat`)")]
+pub struct NetworkModeParseError(String);
+
+impl FromStr for NetworkMode {
+    type Err = NetworkModeParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "nat" => Ok(Self::Nat),
+            _ => Err(NetworkModeParseError(s.to_owned())),
+        }
+    }
+}
+
+impl fmt::Display for NetworkMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Nat => "nat",
+        })
+    }
+}
+
+/// A layer blob stacked on top of the image for one boot only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunLayer {
+    pub digest: LayerDigest,
+    pub size: ByteSize,
+}
+
+impl From<&BuiltLayer> for RunLayer {
+    fn from(layer: &BuiltLayer) -> Self {
+        Self { digest: layer.digest, size: layer.size }
+    }
+}
+
 /// Everything about one boot that is not part of the image.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
@@ -115,6 +171,10 @@ pub struct RunRequest {
     pub forwards: Vec<PortForward>,
     /// Time between SIGTERM and SIGKILL when the host asks for shutdown.
     pub shutdown_grace: Duration,
+    pub network: NetworkMode,
+    /// Run-time files (`run --copy`, `run --file`), bottom → top, stacked on
+    /// top of the image's layers for this boot only.
+    pub layers: Vec<RunLayer>,
 }
 
 /// How the guest's entrypoint ended.
@@ -143,7 +203,7 @@ impl fmt::Display for GuestExit {
         match self {
             Self::Exited(code) => write!(f, "exited with code {code}"),
             Self::Signaled(signal) => write!(f, "was killed by signal {signal}"),
-            Self::InitFailed(message) => write!(f, "failed to start: {message}"),
+            Self::InitFailed(message) => write!(f, "init failed: {message}"),
             Self::NoReport => f.write_str("stopped without reporting an exit status"),
         }
     }

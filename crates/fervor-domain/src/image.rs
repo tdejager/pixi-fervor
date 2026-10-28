@@ -2,12 +2,14 @@
 
 use std::num::NonZeroU32;
 
+use crate::boot::InitVersion;
 use crate::digest::ImageId;
 use crate::entrypoint::Entrypoint;
 use crate::layer::{BuiltLayer, LayerKind};
 use crate::machine::ArtifactSet;
 use crate::manifest::ManifestV1;
 use crate::platform::GuestPlatform;
+use crate::service::{Journal, Services};
 
 /// overlayfs refuses stacks deeper than this many lower layers.
 pub const MAX_LOWER_LAYERS: usize = 500;
@@ -65,25 +67,32 @@ impl LayerStack {
 pub struct Image {
     platform: GuestPlatform,
     boot: BuiltLayer,
+    init: InitVersion,
     layers: LayerStack,
     entrypoint: Entrypoint,
+    services: Services,
+    journal: Option<Journal>,
     scratch: ScratchSize,
     artifacts: ArtifactSet,
 }
 
 impl Image {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         platform: GuestPlatform,
         boot: BuiltLayer,
+        init: InitVersion,
         layers: LayerStack,
         entrypoint: Entrypoint,
+        services: Services,
+        journal: Option<Journal>,
         scratch: ScratchSize,
         artifacts: ArtifactSet,
     ) -> Result<Self, ImageError> {
         if boot.kind != LayerKind::Boot {
             return Err(ImageError::NotABootLayer(boot.label));
         }
-        Ok(Self { platform, boot, layers, entrypoint, scratch, artifacts })
+        Ok(Self { platform, boot, init, layers, entrypoint, services, journal, scratch, artifacts })
     }
 
     /// sha256 of the canonical manifest.
@@ -100,12 +109,25 @@ impl Image {
         &self.boot
     }
 
+    /// What the boot layer's `fervor-init` understands.
+    pub fn init(&self) -> InitVersion {
+        self.init
+    }
+
     pub fn layers(&self) -> &LayerStack {
         &self.layers
     }
 
     pub fn entrypoint(&self) -> &Entrypoint {
         &self.entrypoint
+    }
+
+    pub fn services(&self) -> &Services {
+        &self.services
+    }
+
+    pub fn journal(&self) -> Option<&Journal> {
+        self.journal.as_ref()
     }
 
     pub fn scratch(&self) -> ScratchSize {

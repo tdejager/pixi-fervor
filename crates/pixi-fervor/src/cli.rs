@@ -3,16 +3,18 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use camino::Utf8PathBuf;
-use clap::{Args, Parser, Subcommand};
-use fervor_app::{BuildImage, HostTreeMount};
+use clap::builder::{PossibleValuesParser, TypedValueParser};
+use clap::{ArgMatches, Args, Parser, Subcommand};
+use fervor_app::{BuildImage, HostTreeMount, RunFile};
 use fervor_domain::entrypoint::{Argv, EnvName, EnvVars};
 use fervor_domain::environment::EnvironmentSpec;
 use fervor_domain::image::ScratchSize;
-use fervor_domain::layer::{ConflictPolicy, SizeThresholdPolicy};
-use fervor_domain::machine::{MachineSpec, MemoryMib, PortForward, RunRequest, VcpuCount};
+use fervor_domain::layer::{BuiltLayer, ConflictPolicy, SizeThresholdPolicy};
+use fervor_domain::machine::{MachineSpec, MemoryMib, NetworkMode, PortForward, RunLayer, RunRequest, VcpuCount};
 use fervor_domain::nonempty::NonEmpty;
 use fervor_domain::path::GuestPath;
 use fervor_domain::platform::{GuestLibc, GuestPlatform};
+use fervor_domain::service::{Service, Services};
 use fervor_domain::size::ByteSize;
 use fervor_vmm::pinned_artifacts;
 use miette::{IntoDiagnostic, WrapErr, miette};
@@ -64,6 +66,16 @@ pub struct BuildArgs {
     #[arg(long = "copy", value_name = "SRC:DEST")]
     pub copies: Vec<CopySpec>,
 
+    /// Supervised background process, started before the entrypoint and restarted when it exits.
+    /// COMMAND is split like a shell would (quotes, escapes); no shell runs it.
+    #[arg(long = "service", value_name = "NAME=COMMAND")]
+    pub services: Vec<ServiceArg>,
+
+    /// Run systemd-journald in the guest and send the output of every process to it.
+    /// The image must contain it (e.g. `-s systemd-journald`).
+    #[arg(long)]
+    pub journal: bool,
+
     /// Packages below this archive size share one layer.
     #[arg(long, default_value = "1MiB")]
     pub small_layer_threshold: ByteSize,
@@ -108,6 +120,22 @@ pub struct RunArgs {
     /// Seconds between SIGTERM and SIGKILL when stopping the guest.
     #[arg(long, default_value_t = 10)]
     pub shutdown_grace_secs: u64,
+
+    /// Copy a host directory into the guest for this run, on top of the image.
+    #[arg(long = "copy", value_name = "SRC:DEST")]
+    pub copies: Vec<CopySpec>,
+
+    /// Copy a single host file into the guest for this run; DEST is the file's guest path.
+    #[arg(long = "file", value_name = "SRC:DEST")]
+    pub files: Vec<CopySpec>,
+
+    /// Guest networking: `nat` gives the guest outbound access through the run host (needs root there).
+    #[arg(
+        long,
+        default_value_t = NetworkMode::default(),
+        value_parser = PossibleValuesParser::new(NetworkMode::NAMES).map(|s| s.parse::<NetworkMode>().expect("possible values parse")),
+    )]
+    pub network: NetworkMode,
 }
 
 impl BuildArgs {
@@ -142,6 +170,8 @@ impl BuildArgs {
             argv: Argv::new(NonEmpty::new(self.command).ok_or_else(|| miette!("an entrypoint command is required after `--`"))?),
             env: self.env.into_iter().map(|a| (a.name, a.value)).collect::<EnvVars>(),
             workdir: self.workdir,
+            services: Services::new(self.services.into_iter().map(|s| s.0).collect()).into_diagnostic()?,
+            journal: self.journal,
             host_trees: self.copies.into_iter().map(|c| HostTreeMount { source: c.source, mount_at: c.dest }).collect(),
             policy: SizeThresholdPolicy { threshold: self.small_layer_threshold },
             conflicts: if self.allow_conflicts { ConflictPolicy::UpperLayerWins } else { ConflictPolicy::Reject },
@@ -152,11 +182,27 @@ impl BuildArgs {
 }
 
 impl RunArgs {
-    pub fn request(&self) -> RunRequest {
+    /// `--copy` and `--file` in command-line order, so later ones end up on
+    /// top. `matches` are those of the `run` subcommand.
+    pub fn run_files(&self, matches: &ArgMatches) -> Vec<RunFile> {
+        let positions = |id| matches.indices_of(id).into_iter().flatten();
+        let trees = positions("copies")
+            .zip(&self.copies)
+            .map(|(at, c)| (at, RunFile::Tree(HostTreeMount { source: c.source.clone(), mount_at: c.dest.clone() })));
+        let files = positions("files").zip(&self.files).map(|(at, c)| (at, RunFile::File { source: c.source.clone(), path: c.dest.clone() }));
+        let mut ordered: Vec<_> = trees.chain(files).collect();
+        ordered.sort_by_key(|(at, _)| *at);
+        ordered.into_iter().map(|(_, file)| file).collect()
+    }
+
+    /// `layers`: the run files, built into layers.
+    pub fn request(&self, layers: &[BuiltLayer]) -> RunRequest {
         RunRequest {
             machine: MachineSpec::new(VcpuCount(self.vcpus), MemoryMib(self.memory)),
             forwards: self.forwards.clone(),
             shutdown_grace: Duration::from_secs(self.shutdown_grace_secs),
+            network: self.network,
+            layers: layers.iter().map(RunLayer::from).collect(),
         }
     }
 }
@@ -188,6 +234,22 @@ impl FromStr for CopySpec {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (source, dest) = s.rsplit_once(':').ok_or_else(|| format!("`{s}` is not SRC:DEST"))?;
         Ok(Self { source: source.into(), dest: dest.parse().map_err(|e| format!("{e}"))? })
+    }
+}
+
+/// `NAME=COMMAND`, the command split with shell quoting rules.
+#[derive(Debug, Clone)]
+pub struct ServiceArg(Service);
+
+impl FromStr for ServiceArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (name, command) = s.split_once('=').ok_or_else(|| format!("`{s}` is not NAME=COMMAND"))?;
+        let name = name.parse().map_err(|e| format!("{e}"))?;
+        let words = shell_words::split(command).map_err(|e| format!("splitting `{command}`: {e}"))?;
+        let argv = NonEmpty::new(words).ok_or_else(|| format!("service `{name}` has no command"))?;
+        Ok(Self(Service { name, argv: Argv::new(argv) }))
     }
 }
 

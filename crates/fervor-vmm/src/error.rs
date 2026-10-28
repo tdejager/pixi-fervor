@@ -12,6 +12,10 @@ pub enum RunError {
     PlatformMismatch { image: GuestPlatform, host_arch: &'static str },
     #[error("layer {0} is not available on the run host and cannot be transferred")]
     MissingLayer(LayerDigest),
+    #[error("the image was built by an older fervor whose guest init ignores {0}; rebuild the image")]
+    InitTooOld(&'static str),
+    #[error("--network nat needs root with CAP_NET_ADMIN on the run host")]
+    NoNetAdmin,
     #[error("{context}")]
     Infrastructure {
         context: String,

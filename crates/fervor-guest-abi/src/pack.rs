@@ -1,15 +1,19 @@
-//! On-disk format of the pack device: a header followed by the SquashFS layer
+//! On-disk format of the pack devices: a header followed by the SquashFS layer
 //! images at `PACK_ALIGN`-aligned offsets.
 //!
+//! Two packs share the format and differ in magic and config: the image pack
+//! ([`GuestConfig`], cached per image) and the run pack ([`RunConfig`],
+//! written per run).
+//!
 //! ```text
-//! 0   magic      [u8; 8]  "FERVPACK"
+//! 0   magic      [u8; 8]  `PackConfig::MAGIC`
 //! 8   version    u16 LE
 //! 10  reserved   u16
 //! 12  count      u32 LE   number of layer entries
 //! 16  config_len u32 LE   length of the JSON guest config
 //! 20  reserved   u32
 //! 24  entries    count × { digest [u8; 32], offset u64 LE, len u64 LE }
-//! ..  config     JSON GuestConfig
+//! ..  config     JSON config
 //! ..  zero padding up to the next PACK_ALIGN boundary
 //! ```
 //!
@@ -17,9 +21,24 @@
 
 use std::io::Read;
 
-use crate::GuestConfig;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-pub const PACK_MAGIC: [u8; 8] = *b"FERVPACK";
+use crate::{GuestConfig, RunConfig};
+
+/// The JSON config a pack carries, and the magic that tells packs apart.
+pub trait PackConfig: Serialize + DeserializeOwned {
+    const MAGIC: [u8; 8];
+}
+
+impl PackConfig for GuestConfig {
+    const MAGIC: [u8; 8] = *b"FERVPACK";
+}
+
+impl PackConfig for RunConfig {
+    const MAGIC: [u8; 8] = *b"FERVRUN\0";
+}
+
 pub const PACK_VERSION: u16 = 1;
 /// Alignment of every layer inside the pack (and of the header length).
 pub const PACK_ALIGN: u64 = 4096;
@@ -57,14 +76,14 @@ impl PackEntry {
 
     /// First byte after this layer that the next one may use.
     fn aligned_end(&self) -> u64 {
-        PackHeader::align_up(self.offset + self.len)
+        align_up(self.offset + self.len)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackHeader {
+pub struct PackHeader<C = GuestConfig> {
     layers: Vec<PackEntry>,
-    config: GuestConfig,
+    config: C,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,12 +104,12 @@ pub enum PackError {
     Io(#[from] std::io::Error),
 }
 
-impl PackHeader {
+impl<C: PackConfig> PackHeader<C> {
     /// Lays out layers (bottom → top, given as digest + length) directly after
     /// the header, each at the next aligned offset.
     pub fn layout(
         layers: impl IntoIterator<Item = ([u8; 32], u64)>,
-        config: GuestConfig,
+        config: C,
     ) -> Result<Self, PackError> {
         let layers: Vec<_> = layers.into_iter().collect();
         let config_len = serde_json::to_vec(&config)?.len();
@@ -110,7 +129,7 @@ impl PackHeader {
         &self.layers
     }
 
-    pub fn config(&self) -> &GuestConfig {
+    pub fn config(&self) -> &C {
         &self.config
     }
 
@@ -133,7 +152,7 @@ impl PackHeader {
         let config = serde_json::to_vec(&self.config)?;
         let total = Self::len_for(self.layers.len(), config.len()) as usize;
         let mut out = Vec::with_capacity(total);
-        out.extend_from_slice(&PACK_MAGIC);
+        out.extend_from_slice(&C::MAGIC);
         out.extend_from_slice(&PACK_VERSION.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&(self.layers.len() as u32).to_le_bytes());
@@ -151,7 +170,7 @@ impl PackHeader {
     pub fn read_from(mut reader: impl Read) -> Result<Self, PackError> {
         let mut fixed = [0u8; FIXED_LEN];
         reader.read_exact(&mut fixed)?;
-        if fixed[0..8] != PACK_MAGIC {
+        if fixed[0..8] != C::MAGIC {
             return Err(PackError::BadMagic);
         }
         let version = u16::from_le_bytes([fixed[8], fixed[9]]);
@@ -174,7 +193,7 @@ impl PackHeader {
 
         let mut config = vec![0u8; config_len as usize];
         reader.read_exact(&mut config)?;
-        let config: GuestConfig = serde_json::from_slice(&config)?;
+        let config: C = serde_json::from_slice(&config)?;
 
         let mut min_offset = Self::len_for(layers.len(), config_len as usize);
         for (index, entry) in layers.iter().enumerate() {
@@ -191,12 +210,12 @@ impl PackHeader {
 
     /// Header length for `entries` layers and a `config_len` byte config.
     fn len_for(entries: usize, config_len: usize) -> u64 {
-        Self::align_up((FIXED_LEN + entries * ENTRY_LEN + config_len) as u64)
+        align_up((FIXED_LEN + entries * ENTRY_LEN + config_len) as u64)
     }
+}
 
-    fn align_up(value: u64) -> u64 {
-        value.div_ceil(PACK_ALIGN) * PACK_ALIGN
-    }
+fn align_up(value: u64) -> u64 {
+    value.div_ceil(PACK_ALIGN) * PACK_ALIGN
 }
 
 #[cfg(test)]
@@ -209,6 +228,8 @@ mod tests {
             env: vec![("PATH".into(), "/opt/env/bin".into())],
             workdir: "/".into(),
             scratch_size_mib: 256,
+            services: vec![],
+            journal: None,
         }
     }
 
@@ -233,7 +254,7 @@ mod tests {
         let second_offset = FIXED_LEN + ENTRY_LEN + 32;
         encoded[second_offset..second_offset + 8].copy_from_slice(&8192u64.to_le_bytes());
         assert!(matches!(
-            PackHeader::read_from(encoded.as_slice()),
+            PackHeader::<GuestConfig>::read_from(encoded.as_slice()),
             Err(PackError::BadLayout { index: 1 })
         ));
     }
@@ -241,6 +262,14 @@ mod tests {
     #[test]
     fn rejects_foreign_data() {
         let zeros = vec![0u8; 4096];
-        assert!(matches!(PackHeader::read_from(zeros.as_slice()), Err(PackError::BadMagic)));
+        assert!(matches!(PackHeader::<GuestConfig>::read_from(zeros.as_slice()), Err(PackError::BadMagic)));
+    }
+
+    #[test]
+    fn image_and_run_packs_are_not_interchangeable() {
+        let run = PackHeader::layout([([1; 32], 10)], RunConfig::default()).unwrap();
+        let encoded = run.encode().unwrap();
+        assert_eq!(PackHeader::<RunConfig>::read_from(encoded.as_slice()).unwrap(), run);
+        assert!(matches!(PackHeader::<GuestConfig>::read_from(encoded.as_slice()), Err(PackError::BadMagic)));
     }
 }

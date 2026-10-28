@@ -10,8 +10,8 @@ mod run_host;
 use std::fmt;
 
 use camino::Utf8PathBuf;
-use clap::Parser;
-use fervor_app::ImageBuilder;
+use clap::{CommandFactory, FromArgMatches};
+use fervor_app::{ImageBuilder, RunFile, RunLayerBuilder};
 use fervor_conda::CondaClient;
 use fervor_domain::boot::InitBinary;
 use fervor_domain::image::Image;
@@ -26,11 +26,16 @@ use crate::run_host::RunHost;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> miette::Result<()> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let fervor = Fervor { cache_root: cli.cache_dir.unwrap_or_else(LayerStore::default_root) };
     match cli.command {
         Command::Build(args) => fervor.build(args).await,
-        Command::Run(args) => std::process::exit(fervor.run(args).await?),
+        Command::Run(args) => {
+            // Run files keep their command-line order across `--copy` and `--file`.
+            let files = args.run_files(matches.subcommand_matches("run").expect("parsed as `run`"));
+            std::process::exit(fervor.run(args, files).await?)
+        }
     }
 }
 
@@ -60,11 +65,14 @@ impl Fervor {
         Ok(())
     }
 
+    /// Builds the run files into layers (reusing cached ones), then boots.
     /// Returns the process exit code: the guest entrypoint's.
-    async fn run(&self, args: RunArgs) -> miette::Result<i32> {
+    async fn run(&self, args: RunArgs, files: Vec<RunFile>) -> miette::Result<i32> {
         let image = ImageDir::new(&args.image).load().into_diagnostic()?;
         let host = RunHost::new(&args.run_host, self.cache_root.clone())?;
-        let request = args.request();
+        let builder = RunLayerBuilder::new(&self.cache_root).into_diagnostic()?;
+        let layers = tokio::task::block_in_place(|| builder.build(&files)).into_diagnostic()?;
+        let request = args.request(&layers);
         // The guest prints its own port (e.g. Flask's `Running on …:5000`); say where it is reachable here.
         for forward in &request.forwards {
             eprintln!("publishing {} → guest port {}", forward.host, forward.guest_port);
